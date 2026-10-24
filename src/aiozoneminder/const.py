@@ -34,7 +34,9 @@ API_MONITORS: Final = "api/monitors.json"
 API_MONITOR: Final = "api/monitors/{monitor_id}.json"
 API_EVENTS: Final = "api/events.json"
 API_EVENT: Final = "api/events/{event_id}.json"
-API_CONTROLS: Final = "api/controls/{monitor_id}.json"
+#: PTZ goes through the web UI's control request: the API's ``controls``
+#: resource only lists Control definitions.
+CONTROL_REQUEST_PATH: Final = "index.php"
 API_ALARM_ON: Final = "api/monitors/alarm/id:{monitor_id}/command:on.json"
 API_ALARM_OFF: Final = "api/monitors/alarm/id:{monitor_id}/command:off.json"
 API_STATES: Final = "api/states.json"

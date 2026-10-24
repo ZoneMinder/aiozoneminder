@@ -20,7 +20,6 @@ from ..const import (
     API_ALARM_OFF,
     API_ALARM_ON,
     API_CONFIGS,
-    API_CONTROLS,
     API_EVENT,
     API_EVENTS,
     API_LOGIN,
@@ -32,6 +31,7 @@ from ..const import (
     API_VERSION,
     BACKEND_LEGACY,
     CONFIG_GO2RTC_PATH,
+    CONTROL_REQUEST_PATH,
     DEFAULT_TIMEOUT,
     EVENT_VIDEO_PATH,
     LONG_TIMEOUT,
@@ -71,6 +71,11 @@ _PTZ_MAP = {
     "home": "presetHome",
     "preset": "presetGoto",
 }
+
+#: Pan and tilt speed, in percent of the camera's range, for continuous moves.
+#: ZoneMinder only adds a speed to the command when xge or yge is set, and
+#: several control modules treat a missing speed as zero, which is a stop.
+_PTZ_SPEED = 50
 
 #: ZoneMinder 1.37 renamed the single Function field. Writing both keeps this
 #: backend working across 1.36 and 1.37+.
@@ -317,24 +322,35 @@ class ZoneMinderLegacyClient(ZoneMinderClient):
         await self._request("GET", API_ALARM_OFF.format(monitor_id=monitor_id))
 
     async def ptz(self, monitor_id: int, command: str, **kwargs: Any) -> None:
-        """Issue a PTZ command."""
+        """Issue a PTZ command through ZoneMinder's control request."""
         control = _PTZ_MAP.get(command)
         if control is None:
             raise ZMNotSupportedError(f"Unsupported PTZ command: {command}")
 
-        data: dict[str, Any] = {"control": control}
         if command == "preset":
             preset = kwargs.get("preset")
             if preset is None:
                 raise ZMApiError("The 'preset' command requires a preset number")
-            data["preset"] = preset
-        for key, param in (("x", "xCoord"), ("y", "yCoord")):
-            if (value := kwargs.get(key)) is not None:
-                data[param] = value
+            control = f"{control}{int(preset)}"
 
-        await self._request(
-            "POST", API_CONTROLS.format(monitor_id=monitor_id), data=data
-        )
+        params: dict[str, Any] = {
+            "view": "request",
+            "request": "control",
+            "id": monitor_id,
+            "control": control,
+        }
+        if control.startswith("move") and command != "stop":
+            params["xge"] = params["yge"] = _PTZ_SPEED
+
+        try:
+            response = await self._request("POST", CONTROL_REQUEST_PATH, params=params)
+        except ValueError as err:
+            # Not JSON: a login page or an error page instead of the reply.
+            raise ZMApiError(f"PTZ {command} got no reply from ZoneMinder") from err
+        # The control request answers 200 with result "Error" when it refuses.
+        if not isinstance(response, dict) or response.get("result") != "Ok":
+            message = response.get("message") if isinstance(response, dict) else None
+            raise ZMApiError(f"PTZ {command} failed: {message or response!r}")
 
     # -- Streaming -----------------------------------------------------------
 

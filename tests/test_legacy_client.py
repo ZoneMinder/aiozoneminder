@@ -372,18 +372,19 @@ async def test_alarms(client: ZoneMinderLegacyClient) -> None:
         assert sent(mocked, "GET", "api/monitors/alarm/id:1/command:off.json")
 
 
+CONTROL = {"view": "request", "request": "control", "id": 3, "token": "token"}
+SPEED = {"xge": 50, "yge": 50}
+
+
 @pytest.mark.parametrize(
     ("command", "kwargs", "expected"),
     [
-        ("up", {}, {"control": "moveConUp"}),
+        ("up", {}, {"control": "moveConUp", **SPEED}),
+        ("down-left", {}, {"control": "moveConDownLeft", **SPEED}),
+        ("stop", {}, {"control": "moveStop"}),
         ("zoom-in", {}, {"control": "zoomConTele"}),
         ("home", {}, {"control": "presetHome"}),
-        ("preset", {"preset": 4}, {"control": "presetGoto", "preset": 4}),
-        (
-            "left",
-            {"x": 10, "y": 20},
-            {"control": "moveConLeft", "xCoord": 10, "yCoord": 20},
-        ),
+        ("preset", {"preset": 4}, {"control": "presetGoto4"}),
     ],
 )
 async def test_ptz(
@@ -392,12 +393,32 @@ async def test_ptz(
     kwargs: dict[str, Any],
     expected: dict[str, Any],
 ) -> None:
+    """PTZ goes through the web UI's control request, keyed by monitor id.
+
+    The API's controls resource is read-only (Control definitions), so the
+    request names the monitor and the control verb, and moves carry a speed.
+    """
     with aioresponses() as mocked:
         _login(mocked)
-        mocked.post(v2(r"api/controls/3\.json"), payload={})
+        mocked.post(v2(r"index\.php"), payload={"result": "Ok", "message": "Success"})
         await client.ptz(3, command, **kwargs)
-        (call,) = sent(mocked, "POST", "api/controls/3.json")
-    assert call.kwargs["data"] == expected
+        (call,) = sent(mocked, "POST", "index.php")
+    assert call.kwargs["params"] == {**CONTROL, **expected}
+
+
+async def test_ptz_refusal_raises(client: ZoneMinderLegacyClient) -> None:
+    """The control request answers 200 with result Error when it refuses."""
+    with aioresponses() as mocked:
+        _login(mocked)
+        mocked.post(
+            v2(r"index\.php"),
+            payload={"result": "Error", "message": "Insufficient permissions"},
+        )
+        with pytest.raises(ZMApiError, match="Insufficient permissions"):
+            await client.ptz(3, "left")
+        mocked.post(v2(r"index\.php"), body="<html>login</html>")
+        with pytest.raises(ZMApiError, match="no reply"):
+            await client.ptz(3, "left")
 
 
 async def test_ptz_mistakes(client: ZoneMinderLegacyClient) -> None:
