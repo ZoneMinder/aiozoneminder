@@ -633,6 +633,51 @@ async def test_snapshot(client: ZoneMinderLegacyClient) -> None:
         assert await client.async_get_snapshot(1) is None
 
 
+async def test_snapshot_logs_no_token(
+    client: ZoneMinderLegacyClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A failed snapshot's log line leaves out the URL and its token."""
+    with aioresponses() as mocked:
+        _login(mocked)
+        await client.authenticate()
+        mocked.get(
+            v2("cgi-bin/nph-zms"),
+            exception=aiohttp.InvalidURL(client.get_stream_url(1, mode="single")),
+        )
+        mocked.get(v2("cgi-bin/nph-zms"), status=500)
+        assert await client.async_get_snapshot(1) is None
+        assert await client.async_get_snapshot(1) is None
+
+    assert "Snapshot for monitor 1 failed" in caplog.text
+    assert "token=token" not in caplog.text
+
+
+async def test_snapshot_logs_in_again_once(client: ZoneMinderLegacyClient) -> None:
+    """zms refusing the token (403) gets one fresh login, then the frame."""
+    with aioresponses() as mocked:
+        _login(mocked)
+        await client.authenticate()
+        mocked.get(v2("cgi-bin/nph-zms"), status=403)
+        mocked.get(v2("cgi-bin/nph-zms"), body=b"\xff\xd8jpeg")
+        assert await client.async_get_snapshot(1) == b"\xff\xd8jpeg"
+        assert len(sent(mocked, "POST", "api/host/login.json")) == 2
+
+        mocked.get(v2("cgi-bin/nph-zms"), status=403, repeat=True)
+        assert await client.async_get_snapshot(1) is None
+        assert len(sent(mocked, "POST", "api/host/login.json")) == 3
+
+
+async def test_empty_snapshot_is_a_failure(client: ZoneMinderLegacyClient) -> None:
+    """An empty 200 is no image.
+
+    zms behind nginx/fcgiwrap, before ZoneMinder d27b9612f, answers a refused
+    request that way.
+    """
+    with aioresponses() as mocked:
+        mocked.get(v2("cgi-bin/nph-zms"), body=b"")
+        assert await client.async_get_snapshot(1) is None
+
+
 async def test_media_carries_the_token(client: ZoneMinderLegacyClient) -> None:
     with aioresponses() as mocked:
         _login(mocked)
