@@ -18,8 +18,10 @@ from urllib.parse import quote, urlsplit
 import aiohttp
 
 from ..const import (
+    ALARM_STATES,
     API_ALARM_OFF,
     API_ALARM_ON,
+    API_ALARM_STATUS,
     API_CONFIGS,
     API_DAEMON_CHECK,
     API_EVENT,
@@ -97,6 +99,10 @@ _MONITOR_LIST_TTL = 10.0
 
 #: The most events ZoneMinder returns per page (its paginator's maxLimit).
 _MAX_PAGE_SIZE = 100
+
+#: The alarm status endpoint's numbers. ZoneMinder takes one off zmu's state
+#: (0 is unknown there), so -1 is unknown; 1.36.16 to 1.36.25 didn't.
+_ALARM_STATE_NAMES = dict(enumerate(ALARM_STATES))
 
 #: ZoneMinder 1.37 renamed the single Function field. Writing both keeps this
 #: backend working across 1.36 and 1.37+.
@@ -555,6 +561,20 @@ class ZoneMinderLegacyClient(ZoneMinderClient):
             "GET", self._alarm_endpoint(monitor_id, API_ALARM_OFF)
         )
         _check_alarm_reply(response, monitor_id)
+
+    async def get_alarm_state(self, monitor_id: int) -> str | None:
+        """Return a monitor's alarm state, as zmu reads it from the capture daemon.
+
+        Needs only Monitors view. One request (and one zmu run) per monitor.
+        """
+        response = await self._request(
+            "GET", self._alarm_endpoint(monitor_id, API_ALARM_STATUS)
+        )
+        if not isinstance(response, dict) or response.get("status") == "false":
+            # zmu failed: no capture daemon, or one on another server.
+            _LOGGER.debug("No alarm state for monitor %s: %s", monitor_id, response)
+            return None
+        return _ALARM_STATE_NAMES.get(_to_int(response.get("status"), -1))
 
     def _alarm_endpoint(self, monitor_id: int, endpoint: str) -> str:
         """Return where to change a monitor's alarm.
