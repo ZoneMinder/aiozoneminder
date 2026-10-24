@@ -18,9 +18,10 @@ def _legacy_end(raw: dict[str, Any]) -> Any:
     """Return an API v2 event's end time, or None while it is still recording.
 
     From ZoneMinder 1.37 ``EndDateTime`` is the stored end, null while the
-    event runs. ``EndTime`` is then a computed field that reads as the current
-    time for an open event, so it only counts on older servers, where it is
-    the stored column and ``EndDateTime`` does not exist.
+    event runs. From 1.38.3 ``EndTime`` is a computed field, ``StartDateTime``
+    plus ``Length``, so it has a value while the event is still recording.
+    ``EndTime`` only counts on servers older than 1.37, where it is the stored
+    column and ``EndDateTime`` does not exist.
     """
     if "EndDateTime" in raw:
         return raw["EndDateTime"]

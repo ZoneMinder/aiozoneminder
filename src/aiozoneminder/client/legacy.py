@@ -50,6 +50,7 @@ from ..exceptions import (
     ZMAuthenticationError,
     ZMConnectionError,
     ZMError,
+    ZMNotFoundError,
     ZMNotSupportedError,
 )
 from ..models import (
@@ -215,9 +216,15 @@ class ZoneMinderLegacyClient(ZoneMinderClient):
                 ) as response:
                     response.raise_for_status()
             except (aiohttp.ClientError, TimeoutError) as err:
-                _LOGGER.debug("Logout failed: %s", err)
+                _LOGGER.debug("Logout failed: %s", self._redact(str(err)))
         self._authenticated = False
         self._auth_token = None
+
+    def _redact(self, text: str) -> str:
+        """Remove the access token from text headed for a log or an error."""
+        if self._auth_token:
+            text = text.replace(self._auth_token, "***")
+        return text
 
     async def _request(self, method: str, endpoint: str, **kwargs: Any) -> Any:
         """Make an authenticated request, retrying once after re-authenticating."""
@@ -253,7 +260,7 @@ class ZoneMinderLegacyClient(ZoneMinderClient):
                         await self.authenticate()
                         continue
                     if response.status == 404:
-                        raise ZMApiError(f"Not found: {endpoint}")
+                        raise ZMNotFoundError(f"Not found: {endpoint}")
                     response.raise_for_status()
                     try:
                         return await response.json(content_type=None)
@@ -261,12 +268,17 @@ class ZoneMinderLegacyClient(ZoneMinderClient):
                         raise ZMApiError(
                             f"{endpoint} returned a page that is not JSON"
                         ) from err
+            # aiohttp's errors hold the URL, token included, so they aren't
+            # chained on.
             except aiohttp.ClientResponseError as err:
                 raise ZMApiError(
                     f"{endpoint} returned {err.status}: {err.message}"
-                ) from err
+                ) from None
             except (aiohttp.ClientError, TimeoutError) as err:
-                raise ZMConnectionError(f"Request to {endpoint} failed: {err}") from err
+                detail = self._redact(str(err) or type(err).__name__)
+                raise ZMConnectionError(
+                    f"Request to {endpoint} failed: {detail}"
+                ) from None
 
         raise ZMApiError(f"Request to {endpoint} did not complete")
 
@@ -280,8 +292,8 @@ class ZoneMinderLegacyClient(ZoneMinderClient):
     async def get_server_info(self) -> ServerInfo:
         """Return the version, and whether ZoneMinder's daemons are running.
 
-        daemonCheck needs System view rights; without them ``running`` is
-        False and the version still comes back.
+        If daemonCheck fails, ``running`` stays None and the version still
+        comes back.
         """
         info = ServerInfo(version=await self.get_version())
         try:
@@ -439,7 +451,9 @@ class ZoneMinderLegacyClient(ZoneMinderClient):
             "POST", API_MONITOR.format(monitor_id=monitor_id), data=data
         )
         # A failed save still answers 200, with {"message": "Error ..."}.
-        message = str((response or {}).get("message") or "")
+        message = ""
+        if isinstance(response, dict):
+            message = str(response.get("message") or "")
         if message.startswith("Error"):
             raise ZMApiError(f"Monitor {monitor_id} was not saved: {message}")
 
@@ -483,7 +497,13 @@ class ZoneMinderLegacyClient(ZoneMinderClient):
         events: dict[int, Event] = {}
         page = 1
         while True:
-            response = await self._request("GET", endpoint, params=params)
+            try:
+                response = await self._request("GET", endpoint, params=params)
+            except ZMNotFoundError:
+                if page == 1:
+                    raise
+                # Events deleted while paging can take the last page away.
+                break
             seen = len(events)
             for item in response.get("events") or []:
                 try:

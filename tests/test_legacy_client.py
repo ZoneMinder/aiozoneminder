@@ -1062,3 +1062,65 @@ async def test_server_control_rejects_other_actions(
 ) -> None:
     with pytest.raises(ValueError, match="reboot"):
         await client.server_control("reboot")
+
+
+async def test_failed_logout_logs_no_token(
+    client: ZoneMinderLegacyClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """aiohttp puts the URL, token and all, in a failed logout's error."""
+    caplog.set_level("DEBUG", logger="aiozoneminder")
+    with aioresponses() as mocked:
+        _login(mocked)
+        mocked.get(v2(r"api/host/logout\.json"), status=500)
+        await client.authenticate()
+        await client.close()
+    assert "Logout failed" in caplog.text
+    assert "token=token" not in caplog.text
+
+
+async def test_api_errors_carry_no_token(client: ZoneMinderLegacyClient) -> None:
+    """Nothing in a raised error's chain holds the token-bearing URL."""
+    with aioresponses() as mocked:
+        _login(mocked)
+        mocked.get(v2(r"api/monitors\.json"), status=500)
+        with pytest.raises(ZMApiError) as caught:
+            await client.get_monitors()
+    chain: list[BaseException] = []
+    err: BaseException | None = caught.value
+    while err is not None:
+        chain.append(err)
+        # The chain a traceback prints.
+        err = err.__cause__ or (None if err.__suppress_context__ else err.__context__)
+    assert all("token=token" not in str(e) for e in chain)
+
+
+async def test_set_monitor_state_takes_any_reply_shape(
+    client: ZoneMinderLegacyClient,
+) -> None:
+    """A save answered with something other than a JSON object isn't an error."""
+    with aioresponses() as mocked:
+        _login(mocked)
+        mocked.get(
+            v2(r"api/monitors/1\.json"),
+            payload={"monitor": {"Monitor": _monitor_item(1)["Monitor"]}},
+        )
+        mocked.post(v2(r"api/monitors/1\.json"), payload="Saved")
+        await client.set_monitor_state(1, recording="Always")
+
+
+async def test_event_paging_keeps_what_it_has_on_a_missing_page(
+    client: ZoneMinderLegacyClient,
+) -> None:
+    """A page that went away (events deleted mid-paging) ends the list."""
+    with aioresponses() as mocked:
+        _login(mocked)
+        mocked.get(
+            v2(r"api/events\.json"),
+            payload={
+                "events": [_event(2, "2026-10-24 09:00:00")],
+                "pagination": {"nextPage": True},
+            },
+        )
+        mocked.get(v2(r"api/events\.json"), status=404)
+        events = await client.get_events(limit=500)
+    assert [e.id for e in events] == [2]
