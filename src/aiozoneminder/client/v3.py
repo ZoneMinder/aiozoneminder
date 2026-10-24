@@ -145,6 +145,12 @@ class ZoneMinderV3Client(ZoneMinderClient):
         self._token_expires: datetime | None = None
         self._live_sessions: dict[int, datetime] = {}
         self._live_restarts: dict[int, datetime] = {}
+        #: Serialises token renewals: concurrent 401s share one (zm-api's
+        #: /auth limiter refuses a burst of logins).
+        self._renew_lock = asyncio.Lock()
+        #: Renewals attempted so far, and the error of the last one if it failed.
+        self._renewals = 0
+        self._renew_error: ZMError | None = None
         self._rtsp_links: dict[int, tuple[str, datetime]] = {}
         self._rtsp_unavailable_until: datetime | None = None
         self._whep_supported: bool | None = None
@@ -221,16 +227,46 @@ class ZoneMinderV3Client(ZoneMinderClient):
 
     async def _async_ensure_token(self) -> None:
         """Make sure a usable access token is available."""
-        if not self._authenticated or not self._access_token:
-            await self.authenticate()
-            return
-        if (
-            self._token_expires
-            and datetime.now(UTC) >= self._token_expires - _TOKEN_SKEW
-        ):
-            _LOGGER.debug("Access token near expiry, refreshing")
-            if not await self._refresh():
+        since = self._renewals
+        async with self._renew_lock:
+            if not self._authenticated or not self._access_token:
+                await self._async_renew(since, refresh=False)
+            elif (
+                self._token_expires
+                and datetime.now(UTC) >= self._token_expires - _TOKEN_SKEW
+            ):
+                _LOGGER.debug("Access token near expiry, refreshing")
+                await self._async_renew(since)
+
+    async def _renew(self, refused: str | None, since: int) -> None:
+        """Renew the access token after ``refused`` was turned down.
+
+        ``since`` is the renewal count when the refused request went out.
+        Requests refused at the same time share one renewal: the first to take
+        the lock renews, the others find a newer token and just send again.
+        """
+        async with self._renew_lock:
+            if self._access_token != refused:
+                return
+            await self._async_renew(since)
+
+    async def _async_renew(self, since: int, refresh: bool = True) -> None:
+        """Refresh the token, or log in, with the renewal lock held.
+
+        If a renewal was attempted after ``since`` and failed (zm-api's /auth
+        limiter answering 429, or a changed password), its error is raised
+        again instead of trying once more for every request that waited on it.
+        """
+        if self._renewals != since and self._renew_error is not None:
+            raise self._renew_error
+        self._renewals += 1
+        try:
+            if not (refresh and await self._refresh()):
                 await self.authenticate()
+        except ZMError as err:
+            self._renew_error = err
+            raise
+        self._renew_error = None
 
     async def close(self) -> None:
         """Drop local tokens. JWT logout is stateless."""
@@ -263,7 +299,15 @@ class ZoneMinderV3Client(ZoneMinderClient):
         )
 
         extra_headers = kwargs.pop("headers", {})
+        sent_token, since = self._access_token, self._renewals
         for attempt in (1, 2, 3):
+            if attempt > 1:
+                # Renew outside the refused response, so its connection is
+                # back in the pool for the wait and the login.
+                if attempt == 3:
+                    await asyncio.sleep(_REVOKED_RETRY_DELAY)
+                await self._renew(sent_token, since)
+                sent_token, since = self._access_token, self._renewals
             headers = {**extra_headers, **self._auth_headers()}
             detail: str | None = None
             try:
@@ -280,10 +324,6 @@ class ZoneMinderV3Client(ZoneMinderClient):
                             raise ZMAuthenticationError(
                                 "Authentication failed after refreshing the token"
                             )
-                        if attempt == 2:
-                            await asyncio.sleep(_REVOKED_RETRY_DELAY)
-                        if not await self._refresh():
-                            await self.authenticate()
                         continue
                     if response.status == 404:
                         raise ZMNotFoundError(f"Not found: {endpoint}")
@@ -321,6 +361,7 @@ class ZoneMinderV3Client(ZoneMinderClient):
         after the logout second. The caller checks the status.
         """
         for attempt in (1, 2, 3):
+            sent_token, since = self._access_token, self._renewals
             async with self._session.request(
                 method,
                 url,
@@ -333,8 +374,7 @@ class ZoneMinderV3Client(ZoneMinderClient):
                     return
             if attempt == 2:
                 await asyncio.sleep(_REVOKED_RETRY_DELAY)
-            if not await self._refresh():
-                await self.authenticate()
+            await self._renew(sent_token, since)
 
     async def _paginate(self, endpoint: str, **params: Any) -> list[dict[str, Any]]:
         """Collect every page of a paginated collection endpoint."""
@@ -1000,7 +1040,10 @@ class ZoneMinderV3Client(ZoneMinderClient):
         """Return one JPEG still frame."""
         await self._async_ensure_token()
         url = self._build_url(V3_MONITOR_SNAPSHOT.format(monitor_id=monitor_id))
+        sent_token, since = self._access_token, self._renewals
         for attempt in (1, 2):
+            if attempt == 2:
+                await self._renew(sent_token, since)
             try:
                 async with self._session.get(
                     url,
@@ -1009,7 +1052,6 @@ class ZoneMinderV3Client(ZoneMinderClient):
                     ssl=self._verify_ssl,
                 ) as response:
                     if response.status == 401 and attempt == 1:
-                        await self.authenticate()
                         continue
                     if response.status == 404:
                         # zm-api has no frame for a monitor that isn't capturing.

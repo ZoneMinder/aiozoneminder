@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 import logging
 from typing import Any
 
 import aiohttp
-from aioresponses import aioresponses
+from aioresponses import CallbackResult, aioresponses
 import pytest
 from yarl import URL
 
@@ -173,6 +174,82 @@ async def test_token_renewed_in_the_logout_second_is_renewed_again(
     assert await client.get_version() == "1.39.41"
     assert slept == [1.0]
     # The first login, one after each refusal.
+    assert len(calls(mocked, "POST", "api/v3/auth/login")) == 3
+
+
+async def test_concurrent_refusals_share_one_renewal(
+    client: ZoneMinderV3Client, mocked: aioresponses
+) -> None:
+    # Ten requests refused at once (a revoked token) renew it once, not ten
+    # times: zm-api's /auth limiter answers a burst of logins with 429.
+    register_login(mocked)
+    await client.authenticate()
+    mocked.post(
+        f"{HOST}/api/v3/auth/refresh",
+        payload={"access_token": "fresh-token", "expire_in": 600},
+        repeat=True,
+    )
+
+    refused: list[int] = []
+    all_in = asyncio.Event()
+
+    async def by_token(_url: Any, **kwargs: Any) -> CallbackResult:
+        # The revoked token is refused, once all ten carry it (so they really
+        # overlap); the renewed one works.
+        if kwargs["headers"]["Authorization"] == "Bearer access-token":
+            refused.append(1)
+            if len(refused) == 10:
+                all_in.set()
+            await asyncio.wait_for(all_in.wait(), timeout=5)
+            return CallbackResult(status=401)
+        return CallbackResult(payload={"version": "1.39.41"})
+
+    mocked.get(url("api/v3/host/getVersion"), callback=by_token, repeat=True)
+
+    versions = await asyncio.gather(*(client.get_version() for _ in range(10)))
+
+    assert versions == ["1.39.41"] * 10
+    assert len(calls(mocked, "POST", "api/v3/auth/refresh")) == 1
+    assert len(calls(mocked, "POST", "api/v3/auth/login")) == 1  # the first login only
+
+
+async def test_concurrent_refusals_share_a_failed_renewal(
+    client: ZoneMinderV3Client, mocked: aioresponses
+) -> None:
+    # When the shared renewal fails (zm-api's /auth limiter answers 429), the
+    # requests waiting on it get its error instead of each logging in again.
+    mocked.post(
+        f"{HOST}/api/v3/auth/login",
+        payload={"access_token": "access-token", "refresh_token": "refresh-token"},
+    )
+    await client.authenticate()
+    mocked.post(f"{HOST}/api/v3/auth/refresh", status=429, repeat=True)
+    mocked.post(f"{HOST}/api/v3/auth/login", status=429, repeat=True)
+
+    refused: list[int] = []
+    all_in = asyncio.Event()
+
+    async def all_refused(_url: Any, **kwargs: Any) -> CallbackResult:
+        refused.append(1)
+        if len(refused) == 10:
+            all_in.set()
+        await asyncio.wait_for(all_in.wait(), timeout=5)
+        return CallbackResult(status=401)
+
+    mocked.get(url("api/v3/host/getVersion"), callback=all_refused, repeat=True)
+
+    results = await asyncio.gather(
+        *(client.get_version() for _ in range(10)), return_exceptions=True
+    )
+
+    assert all(isinstance(result, ZMConnectionError) for result in results)
+    assert len(calls(mocked, "POST", "api/v3/auth/refresh")) == 1
+    # The first login, then one for the whole burst.
+    assert len(calls(mocked, "POST", "api/v3/auth/login")) == 2
+
+    # A request sent after the failure tries again rather than reusing it.
+    with pytest.raises(ZMConnectionError):
+        await client.get_version()
     assert len(calls(mocked, "POST", "api/v3/auth/login")) == 3
 
 
