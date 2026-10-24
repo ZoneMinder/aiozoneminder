@@ -630,19 +630,49 @@ class ZoneMinderLegacyClient(ZoneMinderClient):
         return self.get_stream_url(monitor_id)
 
     async def async_get_snapshot(self, monitor_id: int) -> bytes | None:
-        """Return one JPEG still frame."""
-        url = self.get_stream_url(monitor_id, mode="single")
-        try:
-            async with self._session.get(
-                url,
-                timeout=aiohttp.ClientTimeout(total=LONG_TIMEOUT),
-                ssl=self._verify_ssl,
-            ) as response:
-                response.raise_for_status()
-                return await response.read()
-        except (aiohttp.ClientError, TimeoutError) as err:
-            _LOGGER.error("Snapshot for monitor %d failed: %s", monitor_id, err)
-            return None
+        """Return one JPEG still frame, or None when there is none to be had."""
+        for attempt in (1, 2):
+            # The URL carries the token, so it is never logged.
+            url = self.get_stream_url(monitor_id, mode="single")
+            try:
+                async with self._session.get(
+                    url,
+                    timeout=aiohttp.ClientTimeout(total=LONG_TIMEOUT),
+                    ssl=self._verify_ssl,
+                ) as response:
+                    if response.status in (401, 403) and attempt == 1:
+                        # zms refuses an expired token; log in and try once more.
+                        self._authenticated = False
+                        await self.authenticate()
+                        continue
+                    if response.status >= 400:
+                        _LOGGER.error(
+                            "Snapshot for monitor %d failed: HTTP %d",
+                            monitor_id,
+                            response.status,
+                        )
+                        return None
+                    image = await response.read()
+            except (aiohttp.ClientError, TimeoutError) as err:
+                _LOGGER.error(
+                    "Snapshot for monitor %d failed: %s",
+                    monitor_id,
+                    self._redact(str(err) or type(err).__name__),
+                )
+                return None
+            except (ZMAuthenticationError, ZMConnectionError) as err:
+                _LOGGER.error("Snapshot for monitor %d failed: %s", monitor_id, err)
+                return None
+            if not image:
+                # zms behind nginx/fcgiwrap, before ZoneMinder d27b9612f,
+                # answers a refused request with an empty 200.
+                _LOGGER.error(
+                    "Snapshot for monitor %d failed: ZoneMinder sent no image",
+                    monitor_id,
+                )
+                return None
+            return image
+        return None
 
     @asynccontextmanager
     async def async_stream_media(
