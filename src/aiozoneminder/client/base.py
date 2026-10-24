@@ -12,6 +12,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, tzinfo
 from typing import Any
+from urllib.parse import urlsplit
 
 import aiohttp
 
@@ -70,7 +71,15 @@ class ZoneMinderClient(ABC):
         return self._authenticated
 
     def _build_url(self, endpoint: str) -> str:
-        """Join the host with a relative endpoint path."""
+        """Join the host with an endpoint path.
+
+        Behind a proxy that serves ZoneMinder under a path (``http://host/zm``),
+        zm-api writes absolute paths that already start with it (its
+        ``server.public_prefix``); the host's path isn't added a second time.
+        """
+        prefix = urlsplit(self._host).path.rstrip("/")
+        if prefix and endpoint.startswith(f"{prefix}/"):
+            endpoint = endpoint[len(prefix) :]
         return f"{self._host}/{endpoint.lstrip('/')}"
 
     # -- Lifecycle -----------------------------------------------------------

@@ -25,3 +25,7 @@ First release, extracted from the zm-homeassistant Home Assistant integration.
   typed.
 - API v2 turned off (`OPT_USE_API`) raises `ZMConnectionError` naming the
   option, not `ZMAuthenticationError`, so it doesn't read as a wrong password.
+- API v3 behind a proxy path (`http://host/zm`, zm-api's
+  `server.public_prefix` set): paths zm-api writes with the prefix, such as a
+  WHEP session's `Location`, no longer get it twice, so ICE candidates and
+  session closes reach zm-api.
