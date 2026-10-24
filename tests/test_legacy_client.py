@@ -346,6 +346,25 @@ async def test_monitors(client: ZoneMinderLegacyClient) -> None:
     assert driveway.controllable
 
 
+async def test_deleted_monitors_are_left_out(client: ZoneMinderLegacyClient) -> None:
+    """ZoneMinder keeps a deleted monitor's row, marked Deleted, in the list."""
+    with aioresponses() as mocked:
+        _login(mocked)
+        mocked.get(
+            v2(r"api/monitors\.json"),
+            payload={
+                "monitors": [
+                    {"Monitor": {"Id": "1", "Name": "Driveway", "Deleted": False}},
+                    {"Monitor": {"Id": "2", "Name": "Old shed", "Deleted": True}},
+                    {"Monitor": {"Id": "3", "Name": "Garage", "Deleted": "1"}},
+                ]
+            },
+        )
+        monitors = await client.get_monitors()
+
+    assert [m.name for m in monitors] == ["Driveway"]
+
+
 async def test_configs_and_server_info(client: ZoneMinderLegacyClient) -> None:
     with aioresponses() as mocked:
         _login(mocked)

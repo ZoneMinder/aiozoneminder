@@ -209,10 +209,13 @@ class ZoneMinderLegacyClient(ZoneMinderClient):
     # -- Monitors ------------------------------------------------------------
 
     async def get_monitors(self) -> list[Monitor]:
-        """Return every monitor."""
+        """Return every monitor that hasn't been deleted."""
         response = await self._request("GET", API_MONITORS)
         monitors = []
         for item in response.get("monitors") or []:
+            # Deleting a monitor only marks it Deleted, and the list still has it.
+            if item.get("Monitor", item).get("Deleted") in (True, 1, "1"):
+                continue
             try:
                 monitors.append(Monitor.from_dict(item))
             except (KeyError, ValueError, TypeError) as err:
