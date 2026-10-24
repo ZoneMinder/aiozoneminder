@@ -258,6 +258,22 @@ class MonitorStatus:
             updated_on=_parse_datetime(data.get("updated_on")),
         )
 
+    @classmethod
+    def from_dict(
+        cls, data: dict[str, Any], tz: tzinfo | None = None
+    ) -> MonitorStatus | None:
+        """Build from an API v2 ``Monitor_Status`` block, if it has a row."""
+        if not data or data.get("MonitorId") is None:
+            return None
+        return cls(
+            monitor_id=int(data["MonitorId"]),
+            status=data.get("Status") or "Unknown",
+            capture_fps=_to_float(data.get("CaptureFPS")),
+            analysis_fps=_to_float(data.get("AnalysisFPS")),
+            capture_bandwidth=_to_int(data.get("CaptureBandwidth")),
+            updated_on=_parse_datetime(data.get("UpdatedOn"), tz),
+        )
+
 
 @dataclass
 class Event:
@@ -396,6 +412,23 @@ class EventSummary:
             archived_events=_to_int(data.get("archived_events")),
             total_disk_space=_to_int(data.get("total_event_disk_space")),
             day_disk_space=_to_int(data.get("day_event_disk_space")),
+        )
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> EventSummary | None:
+        """Build from an API v2 ``Event_Summary`` block, if it has a row."""
+        if not data or data.get("MonitorId") is None:
+            return None
+        return cls(
+            monitor_id=int(data["MonitorId"]),
+            total_events=_to_int(data.get("TotalEvents")),
+            hour_events=_to_int(data.get("HourEvents")),
+            day_events=_to_int(data.get("DayEvents")),
+            week_events=_to_int(data.get("WeekEvents")),
+            month_events=_to_int(data.get("MonthEvents")),
+            archived_events=_to_int(data.get("ArchivedEvents")),
+            total_disk_space=_to_int(data.get("TotalEventDiskSpace")),
+            day_disk_space=_to_int(data.get("DayEventDiskSpace")),
         )
 
 

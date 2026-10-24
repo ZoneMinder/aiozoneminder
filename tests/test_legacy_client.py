@@ -297,10 +297,86 @@ async def test_v3_only_features_say_so(client: ZoneMinderLegacyClient) -> None:
 
 async def test_reads_without_v3_return_nothing(client: ZoneMinderLegacyClient) -> None:
     """Reads API v2 can't do return empty results rather than failing."""
-    assert await client.get_monitor_statuses() == {}
-    assert await client.get_event_summary(1) is None
     assert await client.get_ptz_presets(1) == {}
     assert await client.async_get_rtsp_url(1) is None
+
+
+async def test_status_and_summaries_come_with_the_monitors(
+    client: ZoneMinderLegacyClient,
+) -> None:
+    """monitors.json carries Monitor_Status and Event_Summary for each monitor.
+
+    One read answers the monitor list, the live status and the summaries, so
+    a refresh costs no extra requests. A monitor zmc has never run for has a
+    Monitor_Status of nulls and gets no status.
+    """
+    with aioresponses() as mocked:
+        _login(mocked)
+        mocked.get(
+            v2(r"api/monitors\.json"),
+            payload={
+                "monitors": [
+                    {
+                        "Monitor": {"Id": 1, "Name": "Driveway", "Capturing": "Always"},
+                        "Monitor_Status": {
+                            "MonitorId": 1,
+                            "Status": "Connected",
+                            "CaptureFPS": "15.02",
+                            "AnalysisFPS": "15.02",
+                            "CaptureBandwidth": 3506,
+                            "UpdatedOn": "2026-10-24 05:18:48",
+                        },
+                        "Event_Summary": {
+                            "MonitorId": 1,
+                            "TotalEvents": 14,
+                            "DayEvents": 3,
+                            "TotalEventDiskSpace": 51200,
+                            "DayEventDiskSpace": 2048,
+                        },
+                    },
+                    {
+                        "Monitor": {"Id": 2, "Name": "Garage", "Capturing": "None"},
+                        "Monitor_Status": {"MonitorId": None, "Status": None},
+                        "Event_Summary": {"MonitorId": None},
+                    },
+                ]
+            },
+        )
+        await client.get_monitors()
+        statuses = await client.get_monitor_statuses()
+        summary = await client.get_event_summary(1)
+        assert await client.get_event_summary(2) is None
+        assert len(sent(mocked, "GET", "api/monitors.json")) == 1
+
+    assert list(statuses) == [1]
+    assert statuses[1].connected is True
+    assert statuses[1].capture_fps == 15.02
+    assert statuses[1].capture_bandwidth == 3506
+    assert summary is not None
+    assert (summary.total_events, summary.day_events) == (14, 3)
+    assert summary.total_disk_space == 51200
+
+
+async def test_status_reads_the_monitors_when_stale(
+    client: ZoneMinderLegacyClient,
+) -> None:
+    """Without a recent monitors.json read, status asks for one."""
+    with aioresponses() as mocked:
+        _login(mocked)
+        mocked.get(
+            v2(r"api/monitors\.json"),
+            payload={
+                "monitors": [
+                    {
+                        "Monitor": {"Id": 1, "Name": "Driveway"},
+                        "Monitor_Status": {"MonitorId": 1, "Status": "NotRunning"},
+                    }
+                ]
+            },
+        )
+        statuses = await client.get_monitor_statuses()
+        assert len(sent(mocked, "GET", "api/monitors.json")) == 1
+    assert statuses[1].connected is False
 
 
 def v2(path: str) -> re.Pattern[str]:

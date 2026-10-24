@@ -11,6 +11,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 import logging
 import re
+import time
 from typing import Any
 from urllib.parse import quote
 
@@ -45,7 +46,14 @@ from ..exceptions import (
     ZMConnectionError,
     ZMNotSupportedError,
 )
-from ..models import Event, Monitor, RunState, ServerInfo
+from ..models import (
+    Event,
+    EventSummary,
+    Monitor,
+    MonitorStatus,
+    RunState,
+    ServerInfo,
+)
 from .base import ZoneMinderClient
 
 _LOGGER = logging.getLogger(__name__)
@@ -84,6 +92,10 @@ _FUNCTION_FROM_STATE = {
 }
 
 
+#: How long one monitors.json read answers status and summary calls, in seconds.
+_EXTRAS_MAX_AGE = 10
+
+
 class ZoneMinderLegacyClient(ZoneMinderClient):
     """Client for ZoneMinder's built-in API."""
 
@@ -96,6 +108,12 @@ class ZoneMinderLegacyClient(ZoneMinderClient):
         self._go2rtc: dict[str, Any] | None = None
         self._go2rtc_checked = False
         self._go2rtc_streams: dict[int, str] = {}
+        #: Monitor_Status and Event_Summary from the last monitors.json read,
+        #: and when it was read. A refresh lists the monitors, then asks for
+        #: their status and summaries; one read answers all three.
+        self._statuses: dict[int, MonitorStatus] = {}
+        self._summaries: dict[int, EventSummary] = {}
+        self._extras_at: float | None = None
 
     # -- Authentication ------------------------------------------------------
 
@@ -212,12 +230,43 @@ class ZoneMinderLegacyClient(ZoneMinderClient):
         """Return every monitor."""
         response = await self._request("GET", API_MONITORS)
         monitors = []
+        statuses: dict[int, MonitorStatus] = {}
+        summaries: dict[int, EventSummary] = {}
         for item in response.get("monitors") or []:
             try:
                 monitors.append(Monitor.from_dict(item))
+                status = MonitorStatus.from_dict(
+                    item.get("Monitor_Status") or {}, self._timezone
+                )
+                summary = EventSummary.from_dict(item.get("Event_Summary") or {})
             except (KeyError, ValueError, TypeError) as err:
                 _LOGGER.warning("Skipping unparsable monitor: %s", err)
+                continue
+            if status is not None:
+                statuses[status.monitor_id] = status
+            if summary is not None:
+                summaries[summary.monitor_id] = summary
+        self._statuses, self._summaries = statuses, summaries
+        self._extras_at = time.monotonic()
         return monitors
+
+    def _extras_fresh(self) -> bool:
+        return (
+            self._extras_at is not None
+            and time.monotonic() - self._extras_at < _EXTRAS_MAX_AGE
+        )
+
+    async def get_monitor_statuses(self) -> dict[int, MonitorStatus]:
+        """Return live capture stats, from the Monitor_Status monitors.json carries."""
+        if not self._extras_fresh():
+            await self.get_monitors()
+        return dict(self._statuses)
+
+    async def get_event_summary(self, monitor_id: int) -> EventSummary | None:
+        """Return a monitor's event counts, from its Event_Summary."""
+        if not self._extras_fresh():
+            await self.get_monitors()
+        return self._summaries.get(monitor_id)
 
     async def get_monitor(self, monitor_id: int) -> Monitor:
         """Return a single monitor."""

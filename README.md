@@ -61,8 +61,9 @@ For API v2, pass `"legacy"` and ZoneMinder's web address instead, such as
 | Snapshots | Yes | Yes |
 | Switch run states | Yes | Yes |
 | Save run states | Yes | No |
-| Live status: capture rate, bandwidth, alarm state | Yes | No |
-| Event summaries (counts and disk use per monitor) | Yes | No |
+| Live status: capture rate, bandwidth | Yes | Yes |
+| Live alarm state | Yes | No |
+| Event summaries (counts and disk use per monitor) | Yes | Yes |
 | Pushed event stream | Yes | No: poll `get_events` |
 | WebRTC playback (WHEP) | Yes | No |
 | Live video | HLS, signed RTSP links | MJPEG, or go2rtc if ZoneMinder has it |
