@@ -43,8 +43,9 @@ can't assume:
   a monitor can't be undone through the API).
 - Paging past 100 events is checked only when a monitor, or the server, has
   more than 100 events (a test can't add events).
-- The event cause on API v2: ZoneMinder records "Forced Web" whatever cause is
-  sent, which is documented rather than fixable in the library.
+- The event cause on API v2 is checked to be the cause sent or "Forced Web":
+  ZoneMinder versions without ``zmu --cause`` record "Forced Web" whatever is
+  sent, and the tests can't tell which version the server runs.
 - Many requests refused together after a token revocation sharing one renewal:
   an unfixed client answers with a burst of logins, which zm-api's login rate
   limit turns into refusals for the tests that follow.

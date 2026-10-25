@@ -631,10 +631,13 @@ class ZoneMinderLegacyClient(ZoneMinderClient):
     async def trigger_alarm(self, monitor_id: int, cause: str) -> None:
         """Force a monitor into alarm state.
 
-        The event's cause is always "Forced Web": ZoneMinder runs ``zmu -a``,
-        which takes no cause, so ``cause`` is sent but not recorded. The web
-        trigger (``ajax/trigger.php``) takes one, but needs Monitors=Edit for
-        every monitor, which would refuse users who may edit only some.
+        ``cause`` is sent as the ``cause`` parameter. ZoneMinder versions whose
+        ``zmu`` has ``--cause`` record it on the event, keeping letters, digits,
+        spaces and plain punctuation and the first 31 bytes; older ones run
+        ``zmu -a`` without it and record "Forced Web". The web trigger
+        (``ajax/trigger.php``) takes a cause on any version, but needs
+        Monitors=Edit for every monitor, which would refuse users who may edit
+        only some.
         """
         response = await self._request(
             "GET",

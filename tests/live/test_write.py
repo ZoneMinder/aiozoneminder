@@ -72,12 +72,15 @@ async def test_alarm(zm: ZoneMinderClient, recording_monitor: Monitor) -> None:
     """A forced alarm records an event that reads as open, then closed after cancelling.
 
     Home Assistant's motion sensor and notifications follow ``in_progress``.
-    On API v2 ZoneMinder records the cause as "Forced Web" whatever is sent.
+    On API v2, ZoneMinder versions without ``zmu --cause`` record "Forced Web"
+    whatever is sent.
     """
     async with forced_alarm(zm, recording_monitor.id) as event:
         assert event.in_progress, f"event {event.id} reads as finished while recording"
         if zm.backend == BACKEND_V3:
             assert CAUSE in event.cause, event.cause
+        else:
+            assert event.cause in (CAUSE, "Forced Web"), event.cause
         assert (await zm.get_event(event.id)).in_progress
     closed = await wait_event_closed(zm, event.id)
     assert closed.end_time is not None
