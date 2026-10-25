@@ -74,6 +74,21 @@ async def test_bad_credentials(client: ZoneMinderLegacyClient) -> None:
             await client.authenticate()
 
 
+async def test_api_disabled_is_not_bad_credentials(
+    client: ZoneMinderLegacyClient,
+) -> None:
+    """OPT_USE_API off answers the login 401 "API Disabled": not a wrong password."""
+    disabled = {
+        "success": False,
+        "data": {"name": "API Disabled", "message": "API Disabled"},
+    }
+    with aioresponses() as mocked:
+        mocked.post(f"{ZM}/api/host/login.json", status=401, payload=disabled)
+        with pytest.raises(ZMConnectionError, match="OPT_USE_API") as err:
+            await client.authenticate()
+    assert not isinstance(err.value, ZMAuthenticationError)
+
+
 async def test_missing_api_explains_itself(client: ZoneMinderLegacyClient) -> None:
     """A 404 on login usually means the URL is missing the /zm path."""
     with aioresponses() as mocked:

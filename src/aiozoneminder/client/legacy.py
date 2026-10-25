@@ -180,6 +180,13 @@ class ZoneMinderLegacyClient(ZoneMinderClient):
                 allow_redirects=True,
             ) as response:
                 if response.status in (401, 403):
+                    # OPT_USE_API off answers every request, login included,
+                    # 401 "API Disabled": the credentials aren't the problem.
+                    if await _error_message(response) == "API Disabled":
+                        raise ZMConnectionError(
+                            f"ZoneMinder's API is disabled at {self._host} "
+                            "(Options > System > OPT_USE_API)"
+                        )
                     raise ZMAuthenticationError("Invalid username or password")
                 if response.status == 404:
                     raise ZMConnectionError(

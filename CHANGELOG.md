@@ -21,3 +21,5 @@ First release, extracted from the zm-homeassistant Home Assistant integration.
   result, so the same code runs against both.
 - Takes the caller's aiohttp session, refreshes tokens itself, and is fully
   typed.
+- API v2 turned off (`OPT_USE_API`) raises `ZMConnectionError` naming the
+  option, not `ZMAuthenticationError`, so it doesn't read as a wrong password.
