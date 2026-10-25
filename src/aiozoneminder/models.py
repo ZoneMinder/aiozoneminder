@@ -97,7 +97,15 @@ def _derive_function(
     ZoneMinder split ``Function`` into ``Capturing``/``Analysing``/``Recording``.
     The server still reports a ``function`` field, but it does not always agree
     with the three real fields, so we derive it instead of trusting it.
+    The six combinations ZoneMinder defines for the old modes (as
+    ``function_fields`` returns them) get those names; any other one gets
+    the nearest.
     """
+    function = _FIELDS_FUNCTION.get(
+        (capturing or "None", analysing or "None", recording or "None")
+    )
+    if function is not None:
+        return function
     if not capturing or capturing == "None":
         return "None"
     analyse = bool(analysing) and analysing != "None"
@@ -252,6 +260,12 @@ _FUNCTION_FIELDS: dict[str, tuple[str, str, str]] = {
     "Record": ("Always", "None", "Always"),
     "Mocord": ("Always", "Always", "Always"),
     "Nodect": ("Always", "None", "OnMotion"),
+}
+
+
+#: Each pre-1.37 ``Function`` by its (capturing, analysing, recording).
+_FIELDS_FUNCTION: dict[tuple[str, str, str], str] = {
+    fields: function for function, fields in _FUNCTION_FIELDS.items()
 }
 
 

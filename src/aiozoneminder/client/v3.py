@@ -7,8 +7,10 @@ See https://github.com/SteveGilvarry/zm-api.
 from __future__ import annotations
 
 import asyncio
+import calendar
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 import json
 import logging
@@ -155,6 +157,8 @@ class ZoneMinderV3Client(ZoneMinderClient):
         self._renew_error: ZMError | None = None
         self._rtsp_links: dict[int, tuple[str, datetime]] = {}
         self._rtsp_unavailable_until: datetime | None = None
+        #: Monitors zm-api refused a link for (no access, or no such monitor).
+        self._rtsp_refused_until: dict[int, datetime] = {}
         self._whep_supported: bool | None = None
 
     # -- Authentication ------------------------------------------------------
@@ -279,6 +283,7 @@ class ZoneMinderV3Client(ZoneMinderClient):
         self._live_sessions.clear()
         self._live_restarts.clear()
         self._rtsp_links.clear()
+        self._rtsp_refused_until.clear()
         self._whep_supported = None
 
     # -- Requests ------------------------------------------------------------
@@ -636,19 +641,75 @@ class ZoneMinderV3Client(ZoneMinderClient):
         events.reverse()
         return events[:limit]
 
-    async def get_event_summary(self, monitor_id: int) -> EventSummary | None:
-        """Return event counts and disk usage for a monitor."""
+    async def get_event_summary(
+        self, monitor_id: int, *, include_archived: bool = True
+    ) -> EventSummary | None:
+        """Return event counts and disk usage for a monitor.
+
+        zm-api's counts include archived events and take no filter for them
+        (zm-api#205). Without them, the monitor's archived events of the last
+        month are read and taken off each count; the total loses them all.
+        """
         try:
             response = await self._request(
                 "GET", V3_EVENT_SUMMARY.format(monitor_id=monitor_id)
             )
-            return EventSummary.from_v3_dict(response)
+            summary = EventSummary.from_v3_dict(response)
         except ZMNotFoundError:
             # zm-api has no summary row for a monitor that has never recorded.
             return EventSummary(monitor_id=monitor_id)
         except (ZMApiError, ZMConnectionError) as err:
             _LOGGER.debug("Event summary for monitor %d failed: %s", monitor_id, err)
             return None
+        if include_archived or not summary.archived_events:
+            return summary
+
+        now = datetime.now(UTC)
+        month_ago = _month_before(now)
+        try:
+            starts = await self._async_archived_starts(monitor_id, month_ago)
+        except (ZMApiError, ZMConnectionError) as err:
+            _LOGGER.debug("Archived events of monitor %d failed: %s", monitor_id, err)
+            return None
+        since = {
+            "hour_events": now - timedelta(hours=1),
+            "day_events": now - timedelta(days=1),
+            "week_events": now - timedelta(weeks=1),
+            "month_events": month_ago,
+        }
+        counts = {
+            field: max(0, getattr(summary, field) - sum(s >= start for s in starts))
+            for field, start in since.items()
+        }
+        counts["total_events"] = max(0, summary.total_events - summary.archived_events)
+        return replace(summary, **counts)
+
+    async def _async_archived_starts(
+        self, monitor_id: int, start: datetime
+    ) -> list[datetime]:
+        """Return when each of a monitor's archived events since ``start`` began."""
+        starts: list[datetime] = []
+        page = 1
+        while True:
+            response = await self._request(
+                "GET",
+                V3_EVENTS,
+                params={
+                    "page": page,
+                    "page_size": 1000,
+                    "monitor_id": monitor_id,
+                    "archived": "true",
+                    "start_time": _iso8601(start),
+                },
+            )
+            for item in response.get("items") or []:
+                try:
+                    starts.append(Event.from_v3_dict(item).start_time)
+                except (KeyError, ValueError, TypeError) as err:
+                    _LOGGER.debug("Skipping unparsable event: %s", err)
+            if not response.get("items") or page >= (response.get("last_page") or 1):
+                return starts
+            page += 1
 
     # -- Alarm and PTZ -------------------------------------------------------
 
@@ -953,6 +1014,9 @@ class ZoneMinderV3Client(ZoneMinderClient):
             return cached[0]
         if self._rtsp_unavailable_until and now < self._rtsp_unavailable_until:
             return None
+        refused = self._rtsp_refused_until.get(monitor_id)
+        if refused and now < refused:
+            return None
 
         try:
             result = await self._request(
@@ -961,8 +1025,16 @@ class ZoneMinderV3Client(ZoneMinderClient):
                 json={"ttl_seconds": int(_RTSP_LINK_TTL.total_seconds())},
             )
         except ZMApiError as err:
-            _LOGGER.debug("RTSP is not available, using HLS: %s", err)
-            self._rtsp_unavailable_until = now + _RTSP_RETRY
+            cause = err.__cause__
+            if isinstance(cause, aiohttp.ClientResponseError) and cause.status == 503:
+                # The RTSP server is off: no monitor can have a link.
+                _LOGGER.debug("RTSP is not available, using HLS: %s", err)
+                self._rtsp_unavailable_until = now + _RTSP_RETRY
+            else:
+                # Refused for this monitor only (no access to it, or no such
+                # monitor); the others may still have links.
+                _LOGGER.debug("No RTSP link for monitor %d: %s", monitor_id, err)
+                self._rtsp_refused_until[monitor_id] = now + _RTSP_RETRY
             return None
         except ZMConnectionError as err:
             _LOGGER.debug(
@@ -1136,6 +1208,15 @@ def _error_message(body: str) -> str | None:
     if not isinstance(message, str):
         return None
     return message.strip() or None
+
+
+def _month_before(value: datetime) -> datetime:
+    """Go back one calendar month, as ZoneMinder's ``INTERVAL 1 MONTH`` does."""
+    year, month = (
+        (value.year, value.month - 1) if value.month > 1 else (value.year - 1, 12)
+    )
+    day = min(value.day, calendar.monthrange(year, month)[1])
+    return value.replace(year=year, month=month, day=day)
 
 
 def _iso8601(value: datetime) -> str:

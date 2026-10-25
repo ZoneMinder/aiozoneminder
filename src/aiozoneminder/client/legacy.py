@@ -9,11 +9,12 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import replace
 import logging
 import re
 import time
 from typing import Any
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import aiohttp
 
@@ -25,6 +26,7 @@ from ..const import (
     API_CONFIGS,
     API_DAEMON_CHECK,
     API_EVENT,
+    API_EVENT_COUNTS_UNARCHIVED,
     API_EVENTS,
     API_LOGIN,
     API_LOGOUT,
@@ -97,8 +99,22 @@ _PTZ_NO_SPEED = {"home", "preset"}
 #: coordinator asks for them straight after the list, in the same poll.
 _MONITOR_LIST_TTL = 10.0
 
+#: consoleEvents interval for each EventSummary count, as zm-py sends them:
+#: ZoneMinder's periods are rolling, and "all" is a hundred years.
+_COUNT_INTERVALS = {
+    "hour_events": "1 hour",
+    "day_events": "1 day",
+    "week_events": "1 week",
+    "month_events": "1 month",
+    "total_events": "100 year",
+}
+
 #: The most events ZoneMinder returns per page (its paginator's maxLimit).
 _MAX_PAGE_SIZE = 100
+
+#: Seconds to wait for states/change (a run state, or start/stop/restart): it
+#: answers only after zmpkg has restarted every daemon.
+_STATE_CHANGE_TIMEOUT = 120
 
 #: The alarm status endpoint's numbers. ZoneMinder takes one off zmu's state
 #: (0 is unknown there), so -1 is unknown; 1.36.16 to 1.36.25 didn't.
@@ -148,6 +164,10 @@ class ZoneMinderLegacyClient(ZoneMinderClient):
         self._zms_checked = zms_path is not None
         self._statuses: dict[int, MonitorStatus] = {}
         self._summaries: dict[int, EventSummary] = {}
+        #: Counts without archived events (EventSummary field to monitor id to
+        #: count), None when ZoneMinder refused them, and when they were read.
+        self._unarchived: dict[str, dict[int, int]] | None = None
+        self._unarchived_at: float | None = None
         self._monitors_fetched_at: float | None = None
         self._go2rtc: dict[str, Any] | None = None
         self._go2rtc_checked = False
@@ -166,6 +186,13 @@ class ZoneMinderLegacyClient(ZoneMinderClient):
                 allow_redirects=True,
             ) as response:
                 if response.status in (401, 403):
+                    # OPT_USE_API off answers every request, login included,
+                    # 401 "API Disabled": the credentials aren't the problem.
+                    if await _error_message(response) == "API Disabled":
+                        raise ZMConnectionError(
+                            f"ZoneMinder's API is disabled at {self._host} "
+                            "(Options > System > OPT_USE_API)"
+                        )
                     raise ZMAuthenticationError("Invalid username or password")
                 if response.status == 404:
                     raise ZMConnectionError(
@@ -239,6 +266,8 @@ class ZoneMinderLegacyClient(ZoneMinderClient):
 
         url = endpoint if "://" in endpoint else self._build_url(endpoint)
         base_params = kwargs.pop("params", {})
+        total = kwargs.pop("timeout", None)
+        timeout = aiohttp.ClientTimeout(total=total) if total else self._timeout
 
         for attempt in (1, 2):
             params = dict(base_params)
@@ -249,7 +278,7 @@ class ZoneMinderLegacyClient(ZoneMinderClient):
                     method,
                     url,
                     params=params,
-                    timeout=self._timeout,
+                    timeout=timeout,
                     ssl=self._verify_ssl,
                     **kwargs,
                 ) as response:
@@ -415,10 +444,58 @@ class ZoneMinderLegacyClient(ZoneMinderClient):
         await self._async_fresh_monitor_list()
         return dict(self._statuses)
 
-    async def get_event_summary(self, monitor_id: int) -> EventSummary | None:
-        """Return a monitor's event counts, from the monitor list."""
+    async def get_event_summary(
+        self, monitor_id: int, *, include_archived: bool = True
+    ) -> EventSummary | None:
+        """Return a monitor's event counts, from the monitor list.
+
+        The list's counts include archived events. Without them, the counts
+        come from consoleEvents instead: one request per period for every
+        monitor, reused for as long as the monitor list is.
+        """
         await self._async_fresh_monitor_list()
-        return self._summaries.get(monitor_id)
+        summary = self._summaries.get(monitor_id)
+        if summary is None or include_archived:
+            return summary
+        counts = await self._async_unarchived_counts()
+        if counts is None:
+            return None
+        return replace(
+            summary,
+            **{field: by_id.get(monitor_id, 0) for field, by_id in counts.items()},
+        )
+
+    async def _async_unarchived_counts(self) -> dict[str, dict[int, int]] | None:
+        """Return every monitor's event counts without archived events."""
+        if (
+            self._unarchived_at is not None
+            and time.monotonic() - self._unarchived_at <= _MONITOR_LIST_TTL
+        ):
+            return self._unarchived
+        counts: dict[str, dict[int, int]] = {}
+        try:
+            for field, interval in _COUNT_INTERVALS.items():
+                response = await self._request(
+                    "GET",
+                    API_EVENT_COUNTS_UNARCHIVED.format(interval=quote(interval)),
+                )
+                # A period with no events answers an empty list, not {}.
+                results = (
+                    response.get("results") if isinstance(response, dict) else None
+                )
+                counts[field] = (
+                    {_to_int(k): _to_int(v) for k, v in results.items()}
+                    if isinstance(results, dict)
+                    else {}
+                )
+        except ZMError as err:
+            # Kept for the TTL too, so a refusal isn't asked again per monitor.
+            _LOGGER.debug("Event counts without archived events failed: %s", err)
+            self._unarchived = None
+        else:
+            self._unarchived = counts
+        self._unarchived_at = time.monotonic()
+        return self._unarchived
 
     async def get_monitor(self, monitor_id: int) -> Monitor:
         """Return a single monitor."""
@@ -476,14 +553,25 @@ class ZoneMinderLegacyClient(ZoneMinderClient):
         ]
 
     async def set_run_state(self, state: RunState) -> None:
-        """Switch run state; ZoneMinder applies it and restarts its daemons."""
+        """Switch run state; ZoneMinder applies it and restarts its daemons.
+
+        ZoneMinder answers only once zmpkg has restarted every daemon, which
+        takes longer the more monitors there are (about 11 s for 45 in a lab),
+        so this call waits longer than the others.
+        """
         await self._request(
-            "POST", API_STATE_CHANGE.format(name=quote(state.name, safe=""))
+            "POST",
+            API_STATE_CHANGE.format(name=quote(state.name, safe="")),
+            timeout=_STATE_CHANGE_TIMEOUT,
         )
 
     async def _async_server_control(self, action: str) -> None:
         """zmpkg.pl takes start, stop and restart as well as run state names."""
-        await self._request("POST", API_STATE_CHANGE.format(name=action))
+        await self._request(
+            "POST",
+            API_STATE_CHANGE.format(name=action),
+            timeout=_STATE_CHANGE_TIMEOUT,
+        )
 
     # -- Events --------------------------------------------------------------
 
@@ -760,8 +848,13 @@ class ZoneMinderLegacyClient(ZoneMinderClient):
             _LOGGER.debug("go2rtc is not configured (%s is unset)", CONFIG_GO2RTC_PATH)
             return None
 
+        # ZoneMinder takes the address with or without the /api suffix, and
+        # with credentials (user:pass@) when go2rtc requires them.
         api_url = api_url.rstrip("/")
-        base_url = api_url[: -len("/api")] if api_url.endswith("/api") else api_url
+        if not api_url.endswith("/api"):
+            api_url += "/api"
+        base_url = api_url[: -len("/api")]
+        shown = _without_credentials(base_url)
 
         try:
             async with self._session.get(
@@ -773,7 +866,7 @@ class ZoneMinderLegacyClient(ZoneMinderClient):
                 response.raise_for_status()
                 info = await response.json(content_type=None)
         except (aiohttp.ClientError, TimeoutError, ValueError) as err:
-            _LOGGER.warning("go2rtc at %s did not respond: %s", api_url, err)
+            _LOGGER.warning("go2rtc at %s did not respond: %s", shown, err)
             return None
 
         rtsp_port = _parse_rtsp_port(info)
@@ -781,7 +874,7 @@ class ZoneMinderLegacyClient(ZoneMinderClient):
             _LOGGER.info(
                 "go2rtc at %s has its RTSP server disabled, so it can't be "
                 "pulled from. Falling back to MJPEG",
-                base_url,
+                shown,
             )
 
         self._go2rtc = {
@@ -793,7 +886,7 @@ class ZoneMinderLegacyClient(ZoneMinderClient):
         self._go2rtc_streams = _match_streams(streams)
         _LOGGER.info(
             "go2rtc at %s: %d monitor streams matched",
-            base_url,
+            shown,
             len(self._go2rtc_streams),
         )
         return self._go2rtc
@@ -859,9 +952,19 @@ def _check_alarm_reply(response: Any, monitor_id: int) -> None:
 
 
 def _parse_host(url: str) -> str | None:
-    """Extract the hostname from a URL."""
-    match = re.match(r"https?://([^:/]+)", url)
-    return match.group(1) if match else None
+    """Extract the hostname from a URL, past any user:pass@."""
+    return urlsplit(url).hostname
+
+
+def _without_credentials(url: str) -> str:
+    """Return the URL without user:pass@, for logging."""
+    parts = urlsplit(url)
+    if parts.username is None and parts.password is None:
+        return url
+    netloc = parts.hostname or ""
+    if parts.port:
+        netloc += f":{parts.port}"
+    return urlunsplit(parts._replace(netloc=netloc))
 
 
 def _parse_rtsp_port(info: dict[str, Any]) -> int | None:
