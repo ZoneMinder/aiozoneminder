@@ -969,6 +969,27 @@ async def test_rtsp_switched_off_is_not_asked_again_at_once(
     assert calls(mocked, "POST", "api/v3/live/2/rtsp/link") == []
 
 
+@pytest.mark.parametrize("status", [403, 404])
+async def test_rtsp_refused_for_one_monitor_leaves_the_others(
+    client: ZoneMinderV3Client, mocked: aioresponses, status: int
+) -> None:
+    # A monitor the user can't see (or that doesn't exist) is refused; that
+    # says nothing about the others, unlike a 503 for the whole RTSP server.
+    register_login(mocked)
+    expires = datetime(2099, 1, 1, tzinfo=UTC).timestamp()
+    mocked.post(url("api/v3/live/1/rtsp/link"), status=status, repeat=True)
+    mocked.post(
+        url("api/v3/live/2/rtsp/link"),
+        payload={"url": "rtsp://zm.local:8554/2?st=signed", "expires_at": expires},
+    )
+
+    assert await client.async_get_rtsp_url(1) is None
+    assert await client.async_get_rtsp_url(2) == "rtsp://zm.local:8554/2?st=signed"
+    # Monitor 1 isn't asked again at once.
+    assert await client.async_get_rtsp_url(1) is None
+    assert len(calls(mocked, "POST", "api/v3/live/1/rtsp/link")) == 1
+
+
 async def test_live_session_is_started_once(
     client: ZoneMinderV3Client, zm_api: aioresponses
 ) -> None:

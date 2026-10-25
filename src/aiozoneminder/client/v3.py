@@ -153,6 +153,8 @@ class ZoneMinderV3Client(ZoneMinderClient):
         self._renew_error: ZMError | None = None
         self._rtsp_links: dict[int, tuple[str, datetime]] = {}
         self._rtsp_unavailable_until: datetime | None = None
+        #: Monitors zm-api refused a link for (no access, or no such monitor).
+        self._rtsp_refused_until: dict[int, datetime] = {}
         self._whep_supported: bool | None = None
 
     # -- Authentication ------------------------------------------------------
@@ -277,6 +279,7 @@ class ZoneMinderV3Client(ZoneMinderClient):
         self._live_sessions.clear()
         self._live_restarts.clear()
         self._rtsp_links.clear()
+        self._rtsp_refused_until.clear()
         self._whep_supported = None
 
     # -- Requests ------------------------------------------------------------
@@ -936,6 +939,9 @@ class ZoneMinderV3Client(ZoneMinderClient):
             return cached[0]
         if self._rtsp_unavailable_until and now < self._rtsp_unavailable_until:
             return None
+        refused = self._rtsp_refused_until.get(monitor_id)
+        if refused and now < refused:
+            return None
 
         try:
             result = await self._request(
@@ -944,8 +950,16 @@ class ZoneMinderV3Client(ZoneMinderClient):
                 json={"ttl_seconds": int(_RTSP_LINK_TTL.total_seconds())},
             )
         except ZMApiError as err:
-            _LOGGER.debug("RTSP is not available, using HLS: %s", err)
-            self._rtsp_unavailable_until = now + _RTSP_RETRY
+            cause = err.__cause__
+            if isinstance(cause, aiohttp.ClientResponseError) and cause.status == 503:
+                # The RTSP server is off: no monitor can have a link.
+                _LOGGER.debug("RTSP is not available, using HLS: %s", err)
+                self._rtsp_unavailable_until = now + _RTSP_RETRY
+            else:
+                # Refused for this monitor only (no access to it, or no such
+                # monitor); the others may still have links.
+                _LOGGER.debug("No RTSP link for monitor %d: %s", monitor_id, err)
+                self._rtsp_refused_until[monitor_id] = now + _RTSP_RETRY
             return None
         except ZMConnectionError as err:
             _LOGGER.debug(
