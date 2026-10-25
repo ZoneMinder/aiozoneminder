@@ -31,9 +31,13 @@ def test_monitor_derives_function_from_split_fields() -> None:
     [
         ("None", "None", "None", "None"),
         ("Always", "None", "None", "Monitor"),
-        ("Always", "Always", "None", "Modect"),
+        ("Always", "Always", "OnMotion", "Modect"),
         ("Always", "None", "Always", "Record"),
-        ("Always", "Always", "OnMotion", "Mocord"),
+        ("Always", "Always", "Always", "Mocord"),
+        ("Always", "None", "OnMotion", "Nodect"),
+        # No pre-1.37 mode has these; the nearest name.
+        ("Always", "Always", "None", "Modect"),
+        ("Ondemand", "None", "None", "Monitor"),
     ],
 )
 def test_function_matrix(
@@ -46,6 +50,20 @@ def test_function_matrix(
         )
     )
     assert parsed.function == expected
+
+
+@pytest.mark.parametrize(
+    "function", ["None", "Monitor", "Modect", "Record", "Mocord", "Nodect"]
+)
+def test_function_round_trips(function: str) -> None:
+    """A monitor set to a mode with function_fields reads back as that mode."""
+    capturing, analysing, recording = function_fields(function)
+    parsed = Monitor.from_v3_dict(
+        make_monitor(
+            1, "x", capturing=capturing, analysing=analysing, recording=recording
+        )
+    )
+    assert parsed.function == function
 
 
 @pytest.mark.parametrize(
@@ -86,7 +104,7 @@ def test_legacy_monitor_expands_function() -> None:
     assert parsed.capturing == "Always"
     assert parsed.analysing == "Always"
     assert parsed.is_analysing is True
-    assert parsed.function == "Mocord"
+    assert parsed.function == "Modect"
 
 
 def test_event_timestamps_are_timezone_aware() -> None:
