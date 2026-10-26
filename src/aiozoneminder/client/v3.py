@@ -193,7 +193,16 @@ class ZoneMinderV3Client(ZoneMinderClient):
                 timeout=self._timeout,
                 ssl=self._verify_ssl,
             ) as response:
-                if response.status in (400, 401, 403):
+                if response.status == 400:
+                    # zm-api checks the user name's format (3-64 of letters,
+                    # digits, "_", "." and "-") before the password, so this
+                    # isn't a wrong password: ZoneMinder allows other names.
+                    detail = _error_message(await response.text())
+                    raise ZMAuthenticationError(
+                        f"zm-api refused the user name {self._username!r}"
+                        + (f": {detail}" if detail else "")
+                    )
+                if response.status in (401, 403):
                     raise ZMAuthenticationError("Invalid username or password")
                 if response.status == 404:
                     raise ZMConnectionError(
