@@ -251,7 +251,8 @@ async def test_deleted_monitors_hidden(
         raw = [item.get("Monitor", item) for item in response.get("monitors") or []]
         deleted = {int(m["Id"]) for m in raw if m.get("Deleted") in (True, 1, "1")}
     else:
-        items = await zm._paginate("api/v3/monitors")  # type: ignore[attr-defined]
+        # zm-api leaves soft-deleted monitors out unless asked for them.
+        items = await zm._paginate("api/v3/monitors", include_deleted="true")  # type: ignore[attr-defined]
         deleted = {int(m["id"]) for m in items if m.get("deleted")}
     if not deleted:
         pytest.skip("the server has no deleted monitor")
