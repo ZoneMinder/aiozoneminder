@@ -1248,3 +1248,32 @@ async def test_server_control_rejects_other_actions(
 ) -> None:
     with pytest.raises(ValueError, match="reboot"):
         await client.server_control("reboot")
+
+
+@pytest.mark.parametrize(
+    "location",
+    ["/zm/api/v3/whep/abc", "/api/v3/whep/abc"],
+)
+async def test_paths_behind_a_proxy_prefix_are_not_doubled(
+    session: aiohttp.ClientSession, location: str
+) -> None:
+    """zm-api behind /zm (server.public_prefix) writes paths that carry the prefix.
+
+    Joined onto a host that ends in /zm, those must not become /zm/zm/...; paths
+    without the prefix keep working as before.
+    """
+    client = ZoneMinderV3Client("http://zm.local/zm", "admin", "secret", session)
+
+    url = client._whep_session_url(location)
+
+    assert url == "http://zm.local/zm/api/v3/whep/abc"
+
+
+async def test_paths_without_a_proxy_prefix_are_unchanged(
+    session: aiohttp.ClientSession,
+) -> None:
+    client = ZoneMinderV3Client("http://zm.local:8080", "admin", "secret", session)
+
+    assert client._whep_session_url("/api/v3/whep/abc") == (
+        "http://zm.local:8080/api/v3/whep/abc"
+    )
