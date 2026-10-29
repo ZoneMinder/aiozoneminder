@@ -29,3 +29,6 @@ First release, extracted from the zm-homeassistant Home Assistant integration.
   `server.public_prefix` set): paths zm-api writes with the prefix, such as a
   WHEP session's `Location`, no longer get it twice, so ICE candidates and
   session closes reach zm-api.
+- Login errors say why when the server does: a user with API access turned
+  off (API v2), or a user name zm-api refuses (API v3, 400), no longer reads
+  as "Invalid username or password".

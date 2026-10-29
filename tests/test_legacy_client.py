@@ -89,6 +89,30 @@ async def test_api_disabled_is_not_bad_credentials(
     assert not isinstance(err.value, ZMAuthenticationError)
 
 
+async def test_api_access_disabled_for_the_user(
+    client: ZoneMinderLegacyClient,
+) -> None:
+    """A user with API Enabled off is told so, not "Invalid username or password"."""
+    message = "API disabled for: admin"
+    disabled = {"success": False, "data": {"name": message, "message": message}}
+    with aioresponses() as mocked:
+        mocked.post(f"{ZM}/api/host/login.json", status=401, payload=disabled)
+        with pytest.raises(ZMAuthenticationError, match="API access is disabled"):
+            await client.authenticate()
+
+
+async def test_wrong_password_reads_as_wrong_password(
+    client: ZoneMinderLegacyClient,
+) -> None:
+    """Cake's other login 401s keep the plain wrong-password message."""
+    for message in ("Invalid username or password", "Not Authenticated"):
+        body = {"success": False, "data": {"name": message, "message": message}}
+        with aioresponses() as mocked:
+            mocked.post(f"{ZM}/api/host/login.json", status=401, payload=body)
+            with pytest.raises(ZMAuthenticationError, match=r"^Invalid username"):
+                await client.authenticate()
+
+
 async def test_missing_api_explains_itself(client: ZoneMinderLegacyClient) -> None:
     """A 404 on login usually means the URL is missing the /zm path."""
     with aioresponses() as mocked:

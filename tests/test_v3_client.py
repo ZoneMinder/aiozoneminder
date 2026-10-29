@@ -71,6 +71,23 @@ async def test_bad_credentials(
         await client.authenticate()
 
 
+async def test_refused_user_name_is_not_a_wrong_password(
+    client: ZoneMinderV3Client, mocked: aioresponses
+) -> None:
+    """zm-api's 400 on the user name's format says so, with zm-api's reason."""
+    mocked.post(
+        f"{HOST}/api/v3/auth/login",
+        status=400,
+        payload={
+            "kind": "INVALID_INPUT_ERROR",
+            "error_message": "username: does not match pattern /^[a-zA-Z0-9_.-]+$/\n",
+        },
+    )
+    with pytest.raises(ZMAuthenticationError, match="refused the user name") as err:
+        await client.authenticate()
+    assert "does not match pattern" in str(err.value)
+
+
 async def test_no_zm_api_suggests_api_v2(
     client: ZoneMinderV3Client, mocked: aioresponses
 ) -> None:
